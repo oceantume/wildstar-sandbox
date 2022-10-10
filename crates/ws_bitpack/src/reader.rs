@@ -1,4 +1,7 @@
-use std::io::{Read, Result};
+#[derive(Debug)]
+pub enum BitPackReaderError {
+    IoError(std::io::Error),
+}
 
 /// A BitPack reader that can be used to read game packets.
 ///
@@ -9,12 +12,12 @@ pub struct BitPackReader<'a> {
     /// Contains the byte currently being read from.
     byte: u8,
     /// The underlying reader.
-    reader: &'a mut dyn Read,
+    reader: &'a mut dyn std::io::Read,
 }
 
 impl<'a> BitPackReader<'a> {
     /// Creates a [`BitPackReader`] from an IO reader.
-    pub fn new(reader: &'a mut dyn Read) -> Self {
+    pub fn new(reader: &'a mut dyn std::io::Read) -> Self {
         Self {
             pos: 0,
             byte: 0,
@@ -29,7 +32,7 @@ impl<'a> BitPackReader<'a> {
 
     /// Advances the reader to the next full byte (pos % 8).
     /// If the reader is already aligned, this does nothing.
-    pub fn align(&mut self) -> Result<()> {
+    pub fn align(&mut self) -> Result<(), BitPackReaderError> {
         while self.pos % 8 != 0 {
             self.read_bit()?;
         }
@@ -37,13 +40,15 @@ impl<'a> BitPackReader<'a> {
         Ok(())
     }
 
-    pub fn read_bit(&mut self) -> Result<bool> {
+    pub fn read_bit(&mut self) -> Result<bool, BitPackReaderError> {
         let pos_in_byte = self.pos % 8;
 
         // at the start of new byte, so we need to read it first.
         if pos_in_byte == 0 {
             let mut buf: [u8; 1] = [0];
-            self.reader.read_exact(&mut buf)?;
+            self.reader
+                .read_exact(&mut buf)
+                .map_err(|err| BitPackReaderError::IoError(err))?;
             self.byte = buf[0];
         }
 
@@ -53,11 +58,11 @@ impl<'a> BitPackReader<'a> {
         Ok(value)
     }
 
-    pub fn read_f32(&mut self) -> Result<f32> {
+    pub fn read_f32(&mut self) -> Result<f32, BitPackReaderError> {
         self.read_u64(32).map(|v| f32::from_bits(v as u32))
     }
 
-    pub fn read_u64(&mut self, bits: usize) -> Result<u64> {
+    pub fn read_u64(&mut self, bits: usize) -> Result<u64, BitPackReaderError> {
         let mut value = 0;
 
         for i in 0..bits {
@@ -69,7 +74,7 @@ impl<'a> BitPackReader<'a> {
         Ok(value)
     }
 
-    pub fn read_bytes(&mut self, buf: &mut [u8]) -> Result<()> {
+    pub fn read_bytes(&mut self, buf: &mut [u8]) -> Result<(), BitPackReaderError> {
         for byte in buf.iter_mut() {
             *byte = self.read_u64(8)? as u8;
         }
@@ -77,7 +82,7 @@ impl<'a> BitPackReader<'a> {
         Ok(())
     }
 
-    pub fn read_string(&mut self, _wide: bool) -> Result<String> {
+    pub fn read_string(&mut self, _wide: bool) -> Result<String, BitPackReaderError> {
         todo!();
     }
 }

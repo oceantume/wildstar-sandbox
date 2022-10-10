@@ -1,4 +1,7 @@
-use std::io::{Result, Write};
+#[derive(Debug)]
+pub enum BitPackWriterError {
+    IoError(std::io::Error),
+}
 
 /// A BitPack writer that can be used to write game packets.
 ///
@@ -9,12 +12,12 @@ pub struct BitPackWriter<'a> {
     /// Contains the byte currently being written to.
     byte: u8,
     /// The underlying writer.
-    writer: &'a mut dyn Write,
+    writer: &'a mut dyn std::io::Write,
 }
 
 impl<'a> BitPackWriter<'a> {
     /// Creates a [`BitPackWriter`] from an IO writer.
-    pub fn new(writer: &'a mut dyn Write) -> Self {
+    pub fn new(writer: &'a mut dyn std::io::Write) -> Self {
         Self {
             pos: 0,
             byte: 0,
@@ -28,7 +31,7 @@ impl<'a> BitPackWriter<'a> {
 
     /// Flushes the current byte by adding 0's until aligned with the next byte.
     /// If the writer is already aligned, this does nothing.
-    pub fn align(&mut self) -> Result<()> {
+    pub fn align(&mut self) -> Result<(), BitPackWriterError> {
         while self.pos % 8 != 0 {
             self.write_bit(false)?;
         }
@@ -36,7 +39,7 @@ impl<'a> BitPackWriter<'a> {
         Ok(())
     }
 
-    pub fn write_bit(&mut self, bit: bool) -> Result<()> {
+    pub fn write_bit(&mut self, bit: bool) -> Result<(), BitPackWriterError> {
         let pos_in_byte = self.pos % 8;
 
         let mut byte = self.byte;
@@ -46,7 +49,9 @@ impl<'a> BitPackWriter<'a> {
 
         // if we're on the last bit in the byte, attempt to write it.
         if pos_in_byte == 7 {
-            self.writer.write_all(&[byte])?;
+            self.writer
+                .write_all(&[byte])
+                .map_err(|err| BitPackWriterError::IoError(err))?;
             byte = 0;
         }
 
@@ -55,7 +60,7 @@ impl<'a> BitPackWriter<'a> {
         Ok(())
     }
 
-    pub fn write_u64(&mut self, value: u64, bits: usize) -> Result<()> {
+    pub fn write_u64(&mut self, value: u64, bits: usize) -> Result<(), BitPackWriterError> {
         for i in 0..bits {
             self.write_bit(((value >> i) & 1) != 0)?;
         }
@@ -63,11 +68,11 @@ impl<'a> BitPackWriter<'a> {
         Ok(())
     }
 
-    pub fn write_f32(&mut self, value: f32) -> Result<()> {
+    pub fn write_f32(&mut self, value: f32) -> Result<(), BitPackWriterError> {
         self.write_u64(value.to_bits() as u64, 32)
     }
 
-    pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), BitPackWriterError> {
         for byte in bytes {
             self.write_u64(*byte as u64, 8)?;
         }
@@ -75,7 +80,7 @@ impl<'a> BitPackWriter<'a> {
         Ok(())
     }
 
-    pub fn write_string(&mut self, _value: String, _wide: bool) -> Result<()> {
+    pub fn write_string(&mut self, _value: String, _wide: bool) -> Result<(), BitPackWriterError> {
         todo!();
     }
 }
