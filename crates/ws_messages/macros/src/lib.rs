@@ -113,7 +113,7 @@ fn get_field_write(field: &Field) -> proc_macro2::TokenStream {
             syn::Type::Path(_) => {
                 quote! {
                     for item in &self.#ident {
-                        ws_messages::MessageValue::unpack(
+                        ws_messages::MessageValue::pack(
                             item, writer_, &#field_metadata)?;
                     }
                 }
