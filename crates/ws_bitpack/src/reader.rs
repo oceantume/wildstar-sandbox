@@ -48,7 +48,7 @@ impl<'a> BitPackReader<'a> {
             let mut buf: [u8; 1] = [0];
             self.reader
                 .read_exact(&mut buf)
-                .map_err(|err| BitPackReaderError::IoError(err))?;
+                .map_err(BitPackReaderError::IoError)?;
             self.byte = buf[0];
         }
 

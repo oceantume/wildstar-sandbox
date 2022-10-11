@@ -51,7 +51,7 @@ impl<'a> BitPackWriter<'a> {
         if pos_in_byte == 7 {
             self.writer
                 .write_all(&[byte])
-                .map_err(|err| BitPackWriterError::IoError(err))?;
+                .map_err(BitPackWriterError::IoError)?;
             byte = 0;
         }
 

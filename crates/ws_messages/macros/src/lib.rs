@@ -8,7 +8,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {};
 
-    return TokenStream::from(expanded);
+    TokenStream::from(expanded)
 }
 
 #[proc_macro_derive(MessageStruct, attributes(aligned, packed, length, ascii))]
@@ -61,7 +61,7 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
         }
     };
 
-    return TokenStream::from(expanded);
+    TokenStream::from(expanded)
 }
 
 fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
@@ -139,7 +139,7 @@ fn get_field_name(field: &Field) -> String {
         .ident
         .as_ref()
         .map(|i| i.to_token_stream().to_string())
-        .unwrap_or("?".to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 enum FieldAccess {
@@ -194,8 +194,7 @@ fn get_metadata_stream(field: &Field, access: FieldAccess) -> proc_macro2::Token
     let is_ascii = field
         .attrs
         .iter()
-        .find(|a| a.path.is_ident("ascii"))
-        .is_some();
+        .any(|a| a.path.is_ident("ascii"));
 
     quote! {
         ws_messages::MessageFieldMetadata {
@@ -208,5 +207,5 @@ fn get_metadata_stream(field: &Field, access: FieldAccess) -> proc_macro2::Token
 
 #[proc_macro_derive(MessageUnion)]
 pub fn derive_message_union(_input: TokenStream) -> TokenStream {
-    return TokenStream::new();
+    TokenStream::new()
 }
