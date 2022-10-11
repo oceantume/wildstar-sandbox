@@ -1,5 +1,6 @@
 [workspace]
 
 members = [
-  "crates/ws_bitpack"
+  "crates/ws_bitpack",
+  "crates/ws_messages"
 ]

@@ -1,0 +1,13 @@
+[package]
+name = "ws_messages"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ws_messages_macros = { path = "macros" }
+ws_bitpack = { path = "../ws_bitpack" }
+
+[dev-dependencies]
+hex = "0.4.3"
