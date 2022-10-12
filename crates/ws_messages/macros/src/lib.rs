@@ -12,6 +12,7 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_derive(MessageStruct, attributes(aligned, packed, length, variant, ascii))]
+//#[proc_macro_derive(SimpleReader, attributes(aligned, packed, length, variant, ascii))]
 pub fn derive_message_struct(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
 
@@ -23,7 +24,7 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
         )));
     };
 
-    let struct_name = &ast.ident;
+    let ident = &ast.ident;
 
     let field_idents = data_struct
         .fields
@@ -42,21 +43,20 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
         .collect::<Vec<_>>();
 
     let expanded = quote! {
-        impl MessageStruct for #struct_name {
-            fn unpack(
-                reader_: &mut ws_bitpack::BitPackReader
-            ) -> Result<Self, ws_bitpack::BitPackReaderError> {
+        impl MessageStruct for #ident {}
+
+        impl ws_messages::reader::SimpleReader<#ident> for ws_messages::reader::MessageReader<#ident> {
+            fn read(reader_: &mut BitPackReader) -> Result<#ident, BitPackReaderError> {
                 use ws_messages::reader::*;
                 #(let #field_idents = #field_reads;)*
-                Ok(Self {
+                Ok(#ident {
                     #(#field_idents,)*
                 })
             }
+        }
 
-            fn pack(
-                &self,
-                writer_: &mut ws_bitpack::BitPackWriter
-            ) -> Result<(), ws_bitpack::BitPackWriterError> {
+        impl ws_messages::writer::SimpleWriter<#ident> for ws_messages::writer::MessageWriter<#ident> {
+            fn write(writer_: &mut BitPackWriter, value_: &#ident) -> Result<(), BitPackWriterError> {
                 use ws_messages::writer::*;
                 #(#field_writes;)*
                 Ok(())
@@ -68,7 +68,7 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
 }
 
 fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
-    let field_metadata = get_field_metadata(field, FieldAccess::FromVar);
+    let field_metadata = get_field_metadata(field, FieldAccess::FromIdent);
 
     match &field.ty {
         syn::Type::Path(_) => get_read_expr(&field_metadata),
@@ -117,16 +117,15 @@ fn get_read_expr(field_metadata: &FieldMetadata) -> proc_macro2::TokenStream {
 
 fn get_field_write(field: &Field) -> proc_macro2::TokenStream {
     let ident = field.ident.as_ref().unwrap();
-    //let field_metadata = get_metadata_stream(field, FieldAccess::FromSelf);
-    let field_metadata = get_field_metadata(field, FieldAccess::FromSelf);
+    let field_metadata = get_field_metadata(field, FieldAccess::FromValueField);
 
     match &field.ty {
-        syn::Type::Path(_) => get_write_expr(&field_metadata, quote!(&self.#ident)),
+        syn::Type::Path(_) => get_write_expr(&field_metadata, quote!(&value_.#ident)),
         Type::Array(a) => match *a.elem {
             syn::Type::Path(_) => {
                 let write_expr = get_write_expr(&field_metadata, quote!(item));
                 quote! {
-                    for item in &self.#ident {
+                    for item in &value_.#ident {
                         #write_expr
                     }
                 }
@@ -174,8 +173,8 @@ fn get_field_name(field: &Field) -> String {
 }
 
 enum FieldAccess {
-    FromVar,
-    FromSelf,
+    FromIdent,
+    FromValueField,
 }
 
 enum FieldMetadata {
@@ -232,8 +231,8 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
             }
         })
         .map(|length| match access {
-            FieldAccess::FromVar => quote!(#length as usize),
-            FieldAccess::FromSelf => quote!(self.#length as usize),
+            FieldAccess::FromIdent => quote!(#length as usize),
+            FieldAccess::FromValueField => quote!(value_.#length as usize),
         });
 
     let variant_expr = field
@@ -253,8 +252,8 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
             }
         })
         .map(|variant| match access {
-            FieldAccess::FromVar => quote!(#variant as usize),
-            FieldAccess::FromSelf => quote!(self.#variant as usize),
+            FieldAccess::FromIdent => quote!(#variant as usize),
+            FieldAccess::FromValueField => quote!(value_.#variant as usize),
         });
 
     let is_ascii = field.attrs.iter().any(|a| a.path.is_ident("ascii"));

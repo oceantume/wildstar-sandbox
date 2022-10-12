@@ -3,7 +3,10 @@ pub use ws_messages_macros::*;
 #[cfg(test)]
 mod tests {
     use crate as ws_messages;
+    use ws_bitpack::*;
     use ws_messages::*;
+    use ws_messages::reader::*;
+    use ws_messages::writer::*;
 
     use std::io::{Cursor, Read};
 
@@ -34,7 +37,7 @@ mod tests {
         reader.read_u64(24).unwrap();
         reader.read_u64(11).unwrap();
 
-        let result = <Message0002 as MessageStruct>::unpack(&mut reader).unwrap();
+        let result: Message0002 = MessageReader::read(&mut reader).unwrap();
         assert_eq!(result.build_number, 6152);
         assert_eq!(result.realm_id, 0);
         assert_eq!(result.realm_group_id, 17);
@@ -69,7 +72,7 @@ mod tests {
             process_creation_time: 0,
         };
 
-        MessageStruct::pack(&message, &mut writer).unwrap();
+        MessageWriter::write(&mut writer, &message).unwrap();
 
         // flush data
         assert!(writer.align().is_ok());
