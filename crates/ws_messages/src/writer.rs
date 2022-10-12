@@ -23,36 +23,13 @@ pub trait AsciiWriter<T> {
     fn write_ascii(writer: &mut BitPackWriter, value: &T) -> Result<(), BitPackWriterError>;
 }
 
-pub trait ListWriter<T> {
-    /// Writes a list of simple values.
-    ///
-    /// Uses [`SimpleWriter::write`] to write each item.
-    fn write_list(writer: &mut BitPackWriter, value: &T) -> Result<(), BitPackWriterError>;
-}
-
-pub trait PackedListWriter<T> {
-    /// Writes a list of packed values.
-    ///
-    /// Uses [`PackedWriter::write_packed`] to read each item.
-    fn write_packed_list(
-        writer: &mut BitPackWriter,
-        value: &T,
-        bits: usize,
-    ) -> Result<(), BitPackWriterError>;
-}
-
 pub trait ListLength<T> {
     /// Returns the length of the list.
     fn list_length(value: &T) -> usize;
 }
 
-pub trait UnionWriter<T> {
-    /// Writes a union value.
-    ///
-    /// Unions are enums with structured variants that are resolved using
-    /// a 0-based variant index.
-    fn write_union(writer: &mut BitPackWriter, value: &T) -> Result<(), BitPackWriterError>;
-    /// Returns the 0-based variant index for that value.
+pub trait UnionVariant<T> {
+    /// Returns the 0-based variant index for that union value.
     fn variant(value: &T) -> usize;
 }
 
@@ -68,11 +45,11 @@ impl AsciiWriter<String> for MessageWriter<String> {
     }
 }
 
-impl<T> ListWriter<Vec<T>> for MessageWriter<Vec<T>>
+impl<T> SimpleWriter<Vec<T>> for MessageWriter<Vec<T>>
 where
     MessageWriter<T>: SimpleWriter<T>,
 {
-    fn write_list(writer: &mut BitPackWriter, value: &Vec<T>) -> Result<(), BitPackWriterError> {
+    fn write(writer: &mut BitPackWriter, value: &Vec<T>) -> Result<(), BitPackWriterError> {
         for item in value {
             MessageWriter::<T>::write(writer, item)?;
         }
@@ -89,11 +66,11 @@ where
     }
 }
 
-impl<T> PackedListWriter<Vec<T>> for MessageWriter<T>
+impl<T> PackedWriter<Vec<T>> for MessageWriter<T>
 where
     MessageWriter<T>: PackedWriter<T>,
 {
-    fn write_packed_list(
+    fn write_packed(
         writer: &mut BitPackWriter,
         value: &Vec<T>,
         bits: usize,
@@ -133,20 +110,3 @@ impl_int_writers!(u32, 32);
 impl_int_writers!(i32, 32);
 impl_int_writers!(u64, 64);
 impl_int_writers!(i64, 64);
-
-// TODO: remove these or move to test mod
-
-struct TestStruct {
-    field: u64,
-    other_field: Vec<u64>,
-    other_field2: Vec<u64>,
-}
-
-impl SimpleWriter<TestStruct> for MessageWriter<TestStruct> {
-    fn write(writer: &mut BitPackWriter, value: &TestStruct) -> Result<(), BitPackWriterError> {
-        MessageWriter::write(writer, &value.field)?;
-        let test_len = MessageWriter::list_length(&value.other_field);
-        MessageWriter::write_list(writer, &value.other_field)?;
-        Ok(())
-    }
-}
