@@ -1,8 +1,6 @@
 use ws_bitpack::{BitPackReader, BitPackReaderError, BitPackWriter, BitPackWriterError};
 mod macros;
 pub use macros::*;
-mod values;
-pub use values::*;
 pub mod reader;
 pub mod writer;
 
@@ -26,4 +24,3 @@ where
     fn unpack(reader: &mut BitPackReader, variant_id: usize) -> Result<Self, BitPackReaderError>;
     fn pack(&self, writer: &mut BitPackWriter) -> Result<(), BitPackWriterError>;
 }
-

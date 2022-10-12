@@ -11,15 +11,16 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-#[proc_macro_derive(MessageStruct, attributes(aligned, packed, length, ascii))]
+#[proc_macro_derive(MessageStruct, attributes(aligned, packed, length, variant, ascii))]
 pub fn derive_message_struct(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
 
     let data_struct = if let syn::Data::Struct(s) = ast.data {
         s
     } else {
-        // TODO: output a `compiler_error!()` instead?
-        panic!("Deriving MessageStruct is only valid on a struct.");
+        return TokenStream::from(quote!(compile_error!(
+            "Deriving MessageStruct is only valid on a struct."
+        )));
     };
 
     let struct_name = &ast.ident;
@@ -45,6 +46,7 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
             fn unpack(
                 reader_: &mut ws_bitpack::BitPackReader
             ) -> Result<Self, ws_bitpack::BitPackReaderError> {
+                use ws_messages::reader::*;
                 #(let #field_idents = #field_reads;)*
                 Ok(Self {
                     #(#field_idents,)*
@@ -55,6 +57,7 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
                 &self,
                 writer_: &mut ws_bitpack::BitPackWriter
             ) -> Result<(), ws_bitpack::BitPackWriterError> {
+                use ws_messages::writer::*;
                 #(#field_writes;)*
                 Ok(())
             }
@@ -65,21 +68,19 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
 }
 
 fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
-    let field_metadata = get_metadata_stream(field, FieldAccess::FromVar);
+    let field_metadata = get_field_metadata(field, FieldAccess::FromVar);
 
     match &field.ty {
-        syn::Type::Path(_) => quote! {
-            ws_messages::MessageValue::unpack(reader_, &#field_metadata)?
-        },
+        syn::Type::Path(_) => get_read_expr(&field_metadata),
         Type::Array(a) => {
             let len = &a.len;
             match *a.elem {
                 syn::Type::Path(_) => {
+                    let read_expr = get_read_expr(&field_metadata);
                     quote! {{
                         let mut result = [Default::default(); #len];
                         for item in &mut result {
-                            *item =  ws_messages::MessageValue::unpack(
-                                reader_, &#field_metadata)?
+                            *item = #read_expr
                         }
                         result
                     }}
@@ -101,20 +102,32 @@ fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
     }
 }
 
+fn get_read_expr(field_metadata: &FieldMetadata) -> proc_macro2::TokenStream {
+    match field_metadata {
+        FieldMetadata::Simple => quote!(MessageReader::read(reader_)?),
+        FieldMetadata::Packed { bits } => quote!(MessageReader::read_packed(reader_, #bits)?),
+        FieldMetadata::List { length } => quote!(MessageReader::read_list(reader_, #length)?),
+        FieldMetadata::PackedList { bits, length } => {
+            quote!(MessageReader::read_packed_list(reader_, #length, #bits)?)
+        }
+        FieldMetadata::Ascii => quote!(MessageReader::read_ascii(reader_)?),
+        FieldMetadata::Union { variant } => quote!(MessageReader::read_union(reader_, #variant)?),
+    }
+}
+
 fn get_field_write(field: &Field) -> proc_macro2::TokenStream {
     let ident = field.ident.as_ref().unwrap();
-    let field_metadata = get_metadata_stream(field, FieldAccess::FromSelf);
+    //let field_metadata = get_metadata_stream(field, FieldAccess::FromSelf);
+    let field_metadata = get_field_metadata(field, FieldAccess::FromSelf);
 
     match &field.ty {
-        syn::Type::Path(_) => quote! {
-            ws_messages::MessageValue::pack(&self.#ident, writer_, &#field_metadata)?
-        },
+        syn::Type::Path(_) => get_write_expr(&field_metadata, quote!(&self.#ident)),
         Type::Array(a) => match *a.elem {
             syn::Type::Path(_) => {
+                let write_expr = get_write_expr(&field_metadata, quote!(item));
                 quote! {
                     for item in &self.#ident {
-                        ws_messages::MessageValue::pack(
-                            item, writer_, &#field_metadata)?;
+                        #write_expr
                     }
                 }
             }
@@ -134,6 +147,24 @@ fn get_field_write(field: &Field) -> proc_macro2::TokenStream {
     }
 }
 
+fn get_write_expr(
+    field_metadata: &FieldMetadata,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match field_metadata {
+        FieldMetadata::Simple => quote!(MessageWriter::write(writer_, #value)?),
+        FieldMetadata::Packed { bits } => {
+            quote!(MessageWriter::write_packed(writer_, #value, #bits)?)
+        }
+        FieldMetadata::List { .. } => quote!(MessageWriter::write(writer_,  #value)?),
+        FieldMetadata::PackedList { bits, .. } => {
+            quote!(MessageWriter::write_packed(writer_, #value, #bits)?)
+        }
+        FieldMetadata::Ascii => quote!(MessageWriter::write_ascii(writer_, #value)?),
+        FieldMetadata::Union { .. } => quote!(MessageWriter::write(writer_, #value)?),
+    }
+}
+
 fn get_field_name(field: &Field) -> String {
     field
         .ident
@@ -147,7 +178,25 @@ enum FieldAccess {
     FromSelf,
 }
 
-fn get_metadata_stream(field: &Field, access: FieldAccess) -> proc_macro2::TokenStream {
+enum FieldMetadata {
+    Simple,
+    Packed {
+        bits: usize,
+    },
+    List {
+        length: proc_macro2::TokenStream,
+    },
+    PackedList {
+        bits: usize,
+        length: proc_macro2::TokenStream,
+    },
+    Ascii,
+    Union {
+        variant: proc_macro2::TokenStream,
+    },
+}
+
+fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
     let packed_bits = field
         .attrs
         .iter()
@@ -156,18 +205,17 @@ fn get_metadata_stream(field: &Field, access: FieldAccess) -> proc_macro2::Token
         .and_then(|meta| {
             if let syn::Meta::List(list) = meta {
                 if let Some(syn::NestedMeta::Lit(syn::Lit::Int(i))) = list.nested.first() {
-                    let bits = i.to_token_stream();
-                    Some(quote!(Some(#bits)))
+                    let bits = i.base10_parse().expect("Invalid number of bits");
+                    Some(bits)
                 } else {
                     None
                 }
             } else {
                 None
             }
-        })
-        .unwrap_or_else(|| quote!(None));
+        });
 
-    let length_ident = field
+    let length_expr = field
         .attrs
         .iter()
         .find(|a| a.path.is_ident("length"))
@@ -183,29 +231,53 @@ fn get_metadata_stream(field: &Field, access: FieldAccess) -> proc_macro2::Token
                 None
             }
         })
-        .map_or_else(
-            || quote!(None),
-            |length| match access {
-                FieldAccess::FromVar => quote!(Some(#length as usize)),
-                FieldAccess::FromSelf => quote!(Some(self.#length as usize)),
-            },
-        );
+        .map(|length| match access {
+            FieldAccess::FromVar => quote!(#length as usize),
+            FieldAccess::FromSelf => quote!(self.#length as usize),
+        });
 
-    let is_ascii = field
+    let variant_expr = field
         .attrs
         .iter()
-        .any(|a| a.path.is_ident("ascii"));
+        .find(|a| a.path.is_ident("variant"))
+        .and_then(|attr| attr.parse_meta().ok())
+        .and_then(|meta| {
+            if let syn::Meta::List(list) = meta {
+                if let Some(syn::NestedMeta::Meta(syn::Meta::Path(p))) = list.nested.first() {
+                    p.get_ident().cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .map(|variant| match access {
+            FieldAccess::FromVar => quote!(#variant as usize),
+            FieldAccess::FromSelf => quote!(self.#variant as usize),
+        });
 
-    quote! {
-        ws_messages::MessageFieldMetadata {
-            bits: #packed_bits,
-            length: #length_ident,
-            ascii: #is_ascii,
+    let is_ascii = field.attrs.iter().any(|a| a.path.is_ident("ascii"));
+
+    if let Some(length) = length_expr {
+        if let Some(bits) = packed_bits {
+            FieldMetadata::PackedList { bits, length }
+        } else {
+            FieldMetadata::List { length }
         }
+    } else if let Some(bits) = packed_bits {
+        FieldMetadata::Packed { bits }
+    } else if let Some(variant) = variant_expr {
+        FieldMetadata::Union { variant }
+    } else if is_ascii {
+        FieldMetadata::Ascii
+    } else {
+        // NOTE: Invalid combinations currently return this. We could look into that at some point.
+        FieldMetadata::Simple
     }
 }
 
 #[proc_macro_derive(MessageUnion)]
 pub fn derive_message_union(_input: TokenStream) -> TokenStream {
-    TokenStream::new()
+    todo!()
 }
