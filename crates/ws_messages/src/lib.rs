@@ -3,6 +3,8 @@ mod macros;
 pub use macros::*;
 mod values;
 pub use values::*;
+pub mod reader;
+pub mod writer;
 
 pub trait Message {
     fn id() -> u32;
