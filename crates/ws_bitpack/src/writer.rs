@@ -80,7 +80,7 @@ impl<'a> BitPackWriter<'a> {
         Ok(())
     }
 
-    pub fn write_string(&mut self, _value: String, _wide: bool) -> Result<(), BitPackWriterError> {
+    pub fn write_string(&mut self, _value: &str, _wide: bool) -> Result<(), BitPackWriterError> {
         todo!();
     }
 }
