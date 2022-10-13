@@ -75,7 +75,7 @@ mod tests {
         MessageWriter::write(&mut writer, &message).unwrap();
 
         // flush data
-        assert!(writer.align().is_ok());
+        assert!(writer.align_and_flush().is_ok());
 
         // check final buffer
         cursor.set_position(0);

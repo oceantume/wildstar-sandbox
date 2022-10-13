@@ -29,9 +29,11 @@ impl<'a> BitPackWriter<'a> {
         self.pos
     }
 
-    /// Flushes the current byte by adding 0's until aligned with the next byte.
+    /// Aligns the writer's position to the next byte by finishing the current byte
+    /// with 0's and flushing it.
+    ///
     /// If the writer is already aligned, this does nothing.
-    pub fn align(&mut self) -> Result<(), BitPackWriterError> {
+    pub fn align_and_flush(&mut self) -> Result<(), BitPackWriterError> {
         while self.pos % 8 != 0 {
             self.write_bit(false)?;
         }
@@ -98,7 +100,7 @@ mod tests {
         // aligning while at 0 stays at 0
         let mut cursor = Cursor::new(Vec::new());
         let mut writer = BitPackWriter::new(&mut cursor);
-        assert!(writer.align().is_ok());
+        assert!(writer.align_and_flush().is_ok());
         assert_eq!(writer.pos(), 0);
         assert_eq!(cursor.position(), 0);
 
@@ -113,7 +115,7 @@ mod tests {
         let mut writer = BitPackWriter::new(&mut cursor);
         assert!(writer.write_bit(true).is_ok());
         assert_eq!(writer.pos(), 1);
-        assert!(writer.align().is_ok());
+        assert!(writer.align_and_flush().is_ok());
         assert_eq!(writer.pos(), 8);
         assert_eq!(cursor.position(), 1);
 
@@ -147,7 +149,7 @@ mod tests {
         assert!(writer.write_u64(0, 64).is_ok());
 
         // data is fully read
-        assert!(writer.align().is_ok());
+        assert!(writer.align_and_flush().is_ok());
         assert_eq!(cursor.position(), 47);
 
         cursor.set_position(0);

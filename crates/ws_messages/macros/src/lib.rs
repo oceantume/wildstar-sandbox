@@ -12,7 +12,6 @@ pub fn derive_message(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_derive(MessageStruct, attributes(aligned, packed, length, variant, ascii))]
-//#[proc_macro_derive(SimpleReader, attributes(aligned, packed, length, variant, ascii))]
 pub fn derive_message_struct(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
 
@@ -25,7 +24,6 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
     };
 
     let ident = &ast.ident;
-
     let field_idents = data_struct
         .fields
         .iter()
@@ -39,7 +37,7 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
     let field_writes = data_struct
         .fields
         .iter()
-        .map(get_field_write)
+        .map(|field| get_field_write(field, FieldAccess::AsField))
         .collect::<Vec<_>>();
 
     let expanded = quote! {
@@ -67,8 +65,125 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+#[proc_macro_derive(MessageUnion)]
+pub fn derive_message_union(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+
+    let data_enum = match ast.data {
+        syn::Data::Enum(e) => e,
+        _ => {
+            return TokenStream::from(quote!(compile_error!(
+                "Deriving MessageStruct is only valid on a struct."
+            )))
+        }
+    };
+
+    let ident = &ast.ident;
+    let variant_indices = data_enum
+        .variants
+        .iter()
+        .enumerate()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let variant_idents = data_enum
+        .variants
+        .iter()
+        .map(|variant| &variant.ident)
+        .collect::<Vec<_>>();
+    let variants_with_fields = data_enum
+        .variants
+        .iter()
+        .map(|variant| match &variant.fields {
+            syn::Fields::Named(fields) => {
+                let fields = fields.named.iter().collect::<Vec<_>>();
+                (variant, fields)
+            }
+            _ => panic!("Only named fields are supported for unions."),
+        });
+    let variant_reads = variants_with_fields
+        .clone()
+        .map(|(variant, fields)| {
+            let variant_ident = &variant.ident;
+            let field_idents = fields.iter().map(|field| &field.ident).collect::<Vec<_>>();
+            let field_reads = fields
+                .iter()
+                .map(|field| get_field_read(*field))
+                .collect::<Vec<_>>();
+            quote! {{
+                #(let #field_idents = #field_reads;)*
+                #ident::#variant_ident {
+                    #(#field_idents,)*
+                }
+            }}
+        })
+        .collect::<Vec<_>>();
+    let variant_writes = variants_with_fields
+        .map(|(variant, fields)| {
+            let variant_ident = &variant.ident;
+            let field_idents = fields
+                .iter()
+                .map(|field| {
+                    field
+                        .ident
+                        .as_ref()
+                        .expect("Unexpected field with no ident")
+                })
+                .collect::<Vec<_>>();
+            let field_writes = fields
+                .iter()
+                .map(|field| get_field_write(*field, FieldAccess::AsVar))
+                .collect::<Vec<_>>();
+            quote! {
+                #ident::#variant_ident { #(#field_idents,)* } => {
+                    #(#field_writes;)*
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let expanded = quote! {
+        impl MessageUnion for #ident {}
+
+        impl ws_messages::reader::UnionReader<#ident> for ws_messages::reader::MessageReader<#ident> {
+            fn read_union(
+                reader_: &mut BitPackReader,
+                variant_: usize,
+            ) -> Result<#ident, BitPackReaderError> {
+                use ws_messages::reader::*;
+                Ok(match variant_ {
+                    #(#variant_indices => #variant_reads,)*
+                    // TODO: use an error instead
+                    _ => panic!("Invalid union variant {}", variant_)
+                })
+            }
+        }
+
+        impl ws_messages::writer::SimpleWriter<#ident> for ws_messages::writer::MessageWriter<#ident> {
+            fn write(
+                writer_: &mut BitPackWriter,
+                value_: &#ident,
+            ) -> Result<(), BitPackWriterError> {
+                use ws_messages::writer::*;
+                Ok(match value_ {
+                    #(#variant_writes,)*
+                })
+            }
+        }
+
+        impl ws_messages::writer::UnionVariant<#ident> for ws_messages::writer::MessageWriter<#ident> {
+            fn variant(value: &#ident) -> usize {
+                match value {
+                    #(#ident::#variant_idents { .. } => #variant_indices,)*
+                }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
-    let field_metadata = get_field_metadata(field, FieldAccess::FromIdent);
+    let field_metadata = get_field_metadata(field, FieldAccess::AsVar);
 
     match &field.ty {
         syn::Type::Path(_) => get_read_expr(&field_metadata),
@@ -115,17 +230,21 @@ fn get_read_expr(field_metadata: &FieldMetadata) -> proc_macro2::TokenStream {
     }
 }
 
-fn get_field_write(field: &Field) -> proc_macro2::TokenStream {
+fn get_field_write(field: &Field, access: FieldAccess) -> proc_macro2::TokenStream {
     let ident = field.ident.as_ref().unwrap();
-    let field_metadata = get_field_metadata(field, FieldAccess::FromValueField);
+    let field_metadata = get_field_metadata(field, FieldAccess::AsField);
+    let field_access = match access {
+        FieldAccess::AsVar => quote!(#ident),
+        FieldAccess::AsField => quote!(&value_.#ident),
+    };
 
     match &field.ty {
-        syn::Type::Path(_) => get_write_expr(&field_metadata, quote!(&value_.#ident)),
+        syn::Type::Path(_) => get_write_expr(&field_metadata, field_access),
         Type::Array(a) => match *a.elem {
             syn::Type::Path(_) => {
                 let write_expr = get_write_expr(&field_metadata, quote!(item));
                 quote! {
-                    for item in &value_.#ident {
+                    for item in #field_access {
                         #write_expr
                     }
                 }
@@ -172,11 +291,15 @@ fn get_field_name(field: &Field) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
+/// Indicates how the fields should be accessed.
 enum FieldAccess {
-    FromIdent,
-    FromValueField,
+    /// Access as a variable with the same ident as the field itself.
+    AsVar,
+    /// Access as a field of a local variable named `value_`.
+    AsField,
 }
 
+/// Extra field metadata generated from attributes.
 enum FieldMetadata {
     Simple,
     Packed {
@@ -231,8 +354,8 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
             }
         })
         .map(|length| match access {
-            FieldAccess::FromIdent => quote!(#length as usize),
-            FieldAccess::FromValueField => quote!(value_.#length as usize),
+            FieldAccess::AsVar => quote!(#length as usize),
+            FieldAccess::AsField => quote!(value_.#length as usize),
         });
 
     let variant_expr = field
@@ -252,8 +375,8 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
             }
         })
         .map(|variant| match access {
-            FieldAccess::FromIdent => quote!(#variant as usize),
-            FieldAccess::FromValueField => quote!(value_.#variant as usize),
+            FieldAccess::AsVar => quote!(#variant as usize),
+            FieldAccess::AsField => quote!(value_.#variant as usize),
         });
 
     let is_ascii = field.attrs.iter().any(|a| a.path.is_ident("ascii"));
@@ -274,9 +397,4 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
         // NOTE: Invalid combinations currently return this. We could look into that at some point.
         FieldMetadata::Simple
     }
-}
-
-#[proc_macro_derive(MessageUnion)]
-pub fn derive_message_union(_input: TokenStream) -> TokenStream {
-    todo!()
 }
