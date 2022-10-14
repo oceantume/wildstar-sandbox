@@ -197,4 +197,35 @@ mod tests {
             00000000000000489208b89c000000000000000000000000"
         );
     }
+
+    #[derive(MessageStruct)]
+    struct Message02EE {
+        account_id: u32,
+        #[aligned]
+        session_guid: [u8; 16],
+        account_name: String,
+    }
+
+    #[test]
+    fn test_message_2() {
+        let data = hex::decode(
+            "2a0000ee0aae010000ba75a452f8a21b49b0d886ed\
+            0d9e58a81063006c0061006d006f0075006e006500",
+        )
+        .unwrap();
+
+        let guid_data = hex::decode("ba75a452f8a21b49b0d886ed0d9e58a8").unwrap();
+
+        let mut cursor = Cursor::new(&data);
+        let mut reader = BitPackReader::new(&mut cursor);
+
+        // header
+        reader.read_u64(24).unwrap();
+        reader.read_u64(11).unwrap();
+
+        let result: Message02EE = MessageReader::read(&mut reader).unwrap();
+        assert_eq!(result.account_id, 13761);
+        assert_eq!(result.session_guid, guid_data.as_slice());
+        assert_eq!(result.account_name, "clamoune");
+    }
 }

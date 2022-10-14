@@ -56,13 +56,23 @@ pub trait UnionReader<T> {
 
 impl SimpleReader<String> for MessageReader<String> {
     fn read(reader: &mut BitPackReader) -> Result<String, BitPackReaderError> {
-        reader.read_string(true)
+        let extended = reader.read_bit()?;
+        let length_bits = if extended { 15 } else { 7 };
+        let length = reader.read_u64(length_bits)? as usize;
+        
+        let mut vec =  Vec::<u16>::with_capacity(length);
+        for _ in 0..length {
+            vec.push(reader.read_u64(16)? as u16)
+        }
+
+        // TODO add to reader Error type instead of panicking
+        Ok(String::from_utf16(&vec).unwrap())
     }
 }
 
 impl AsciiReader<String> for MessageReader<String> {
-    fn read_ascii(reader: &mut BitPackReader) -> Result<String, BitPackReaderError> {
-        reader.read_string(false)
+    fn read_ascii(_reader: &mut BitPackReader) -> Result<String, BitPackReaderError> {
+        todo!("Add support for ascii strings.");
     }
 }
 
@@ -99,9 +109,7 @@ where
 macro_rules! impl_int_readers {
     ( $t: ident, $bits: literal ) => {
         impl SimpleReader<$t> for MessageReader<$t> {
-            fn read(
-                reader: &mut BitPackReader
-            ) -> Result<$t, BitPackReaderError> {
+            fn read(reader: &mut BitPackReader) -> Result<$t, BitPackReaderError> {
                 reader.read_u64($bits).map(|v| v as $t)
             }
         }
@@ -109,12 +117,12 @@ macro_rules! impl_int_readers {
         impl PackedReader<$t> for MessageReader<$t> {
             fn read_packed(
                 reader: &mut BitPackReader,
-                bits: usize
+                bits: usize,
             ) -> Result<$t, BitPackReaderError> {
                 reader.read_u64(bits).map(|v| v as $t)
             }
         }
-    }
+    };
 }
 
 impl_int_readers!(u8, 8);
