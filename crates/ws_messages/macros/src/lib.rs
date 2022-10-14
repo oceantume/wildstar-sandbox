@@ -184,15 +184,23 @@ pub fn derive_message_union(input: TokenStream) -> TokenStream {
 
 fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
     let field_metadata = get_field_metadata(field, FieldAccess::AsVar);
+    let align_expr = match get_field_aligned(field) {
+        true => quote!(reader_.align()?),
+        false => quote!(),
+    };
 
     match &field.ty {
-        syn::Type::Path(_) => get_read_expr(&field_metadata),
+        syn::Type::Path(_) => {
+            let read_expr = get_read_expr(&field_metadata);
+            quote!{{ #align_expr; #read_expr }}
+        },
         Type::Array(a) => {
             let len = &a.len;
             match *a.elem {
                 syn::Type::Path(_) => {
                     let read_expr = get_read_expr(&field_metadata);
                     quote! {{
+                        #align_expr;
                         let mut result = [Default::default(); #len];
                         for item in &mut result {
                             *item = #read_expr
@@ -237,13 +245,21 @@ fn get_field_write(field: &Field, access: FieldAccess) -> proc_macro2::TokenStre
         FieldAccess::AsVar => quote!(#ident),
         FieldAccess::AsField => quote!(&value_.#ident),
     };
+    let align_expr = match get_field_aligned(field) {
+        true => quote!(writer_.align_and_flush()?),
+        false => quote!(),
+    };
 
     match &field.ty {
-        syn::Type::Path(_) => get_write_expr(&field_metadata, field_access),
+        syn::Type::Path(_) => {
+            let write_expr = get_write_expr(&field_metadata, field_access);
+            quote!({ #align_expr; #write_expr })
+        },
         Type::Array(a) => match *a.elem {
             syn::Type::Path(_) => {
                 let write_expr = get_write_expr(&field_metadata, quote!(item));
                 quote! {
+                    #align_expr;
                     for item in #field_access {
                         #write_expr
                     }
@@ -316,6 +332,10 @@ enum FieldMetadata {
     Union {
         variant: proc_macro2::TokenStream,
     },
+}
+
+fn get_field_aligned(field: &Field) -> bool {
+    field.attrs.iter().any(|a| a.path.is_ident("aligned"))
 }
 
 fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
