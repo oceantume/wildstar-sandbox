@@ -2,26 +2,20 @@ pub use ws_messages_macros::*;
 
 #[cfg(test)]
 mod tests {
-    use crate as ws_messages;
     use ws_bitpack::*;
-    use ws_messages::reader::*;
-    use ws_messages::writer::*;
-    use ws_messages::*;
-
-    use std::io::{Cursor, Read};
+    use crate::*;
 
     fn write_and_read<T>(input: &T) -> T
     where
-        MessageWriter<T>: SimpleWriter<T>,
-        MessageReader<T>: SimpleReader<T>,
+        T: WriteValue,
+        T: ReadValue,
     {
-        let mut cursor = Cursor::new(Vec::new());
-        let mut writer = BitPackWriter::new(&mut cursor);
-        MessageWriter::write(&mut writer, input).unwrap();
-        writer.align_and_flush().unwrap();
-        cursor.set_position(0);
-        let mut reader = BitPackReader::new(&mut cursor);
-        MessageReader::read(&mut reader).unwrap()
+        let mut buf = [0u8; 65536];
+        let mut writer = BitPackWriter::new(&mut buf);
+        writer.write(input).unwrap();
+        writer.align().unwrap();
+        let mut reader = BitPackReader::new(&buf);
+        reader.read().unwrap()
     }
 
     #[test]
@@ -98,9 +92,10 @@ mod tests {
             Union::Unsigned64 { value } => Some(value),
             _ => None,
         };
+        assert_eq!(out_union_value, Some(123456789123456789));
+        assert_eq!(out_union_value.unwrap().bits(), 64);
 
         // test second variant
-        assert_eq!(out_union_value, Some(123456789123456789));
         let in_value = Struct {
             id: 1,
             union: Union::Signed16 { value: -12349 },
@@ -111,6 +106,7 @@ mod tests {
             _ => None,
         };
         assert_eq!(out_union_value, Some(-12349));
+        assert_eq!(out_union_value.unwrap().bits(), 16);
 
         // test invalid variant (should panic during read with above message)
         let in_value = Struct {
@@ -140,14 +136,13 @@ mod tests {
         let data = "2f00000240c00000000000008800000000000000000000\
             00000000000000489208b89c000000000000000000000000";
         let data = hex::decode(data).unwrap();
-        let mut cursor = Cursor::new(&data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
 
         // header
         reader.read_u64(24).unwrap();
         reader.read_u64(11).unwrap();
 
-        let result: Message0002 = MessageReader::read(&mut reader).unwrap();
+        let result: Message0002 = reader.read().unwrap();
         assert_eq!(result.build_number, 6152);
         assert_eq!(result.realm_id, 0);
         assert_eq!(result.realm_group_id, 17);
@@ -162,12 +157,8 @@ mod tests {
 
     #[test]
     fn test_simple_write() {
-        let mut cursor = Cursor::new(Vec::new());
-        let mut writer = BitPackWriter::new(&mut cursor);
-
-        // header
-        assert!(writer.write_u64(47, 24).is_ok());
-        assert!(writer.write_u64(2, 11).is_ok());
+        let mut buf = [0u8; 47];
+        let mut writer = BitPackWriter::new(&mut buf);
 
         let message = Message0002 {
             build_number: 6152,
@@ -182,20 +173,35 @@ mod tests {
             process_creation_time: 0,
         };
 
-        MessageWriter::write(&mut writer, &message).unwrap();
-
-        // flush data
-        assert!(writer.align_and_flush().is_ok());
+        // header
+        assert!(writer.write_u64(47, 24).is_ok());
+        assert!(writer.write_u64(2, 11).is_ok());
+        writer.write(&message).unwrap();
 
         // check final buffer
-        cursor.set_position(0);
-        let mut vec = Vec::new();
-        cursor.read_to_end(&mut vec).unwrap();
         assert_eq!(
-            hex::encode(&vec),
+            hex::encode(&buf),
             "2f00000240c00000000000008800000000000000000000\
             00000000000000489208b89c000000000000000000000000"
         );
+    }
+
+    #[test]
+    fn test_simple_bits() {
+        let message = Message0002 {
+            build_number: 6152,
+            realm_id: 0,
+            realm_group_id: 17,
+            realm_group_enum: 0,
+            startup_time: 0,
+            listen_port: 0,
+            connection_type: 9,
+            network_message_crc: 2629306514,
+            process_id: 0,
+            process_creation_time: 0,
+        };
+
+        assert_eq!(message.bits(), 341);
     }
 
     #[derive(MessageStruct)]
@@ -208,22 +214,20 @@ mod tests {
 
     #[test]
     fn test_message_2() {
-        let data = hex::decode(
+        let data: Vec<u8> = hex::decode(
             "2a0000ee0aae010000ba75a452f8a21b49b0d886ed\
             0d9e58a81063006c0061006d006f0075006e006500",
         )
         .unwrap();
 
         let guid_data = hex::decode("ba75a452f8a21b49b0d886ed0d9e58a8").unwrap();
-
-        let mut cursor = Cursor::new(&data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
 
         // header
         reader.read_u64(24).unwrap();
         reader.read_u64(11).unwrap();
 
-        let result: Message02EE = MessageReader::read(&mut reader).unwrap();
+        let result: Message02EE = reader.read().unwrap();
         assert_eq!(result.account_id, 13761);
         assert_eq!(result.session_guid, guid_data.as_slice());
         assert_eq!(result.account_name, "clamoune");

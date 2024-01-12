@@ -1,68 +1,68 @@
-#[derive(Debug)]
-pub enum BitPackReaderError {
-    IoError(std::io::Error),
-}
+use crate::{
+    BitPackError, BitPackResult, ReadArrayValue, ReadPackedArrayValue, ReadPackedValue, ReadValue,
+};
 
 /// A BitPack reader that can be used to read game packets.
 ///
-/// This implementation is very simple and could be optimized.
+/// While this guarantees not to panic, it should not be used anymore after any of
+/// its functions returns an error because the bit stream may be corrupted at that
+/// point.
+///
+/// This implementation is very inefficient and could be optimized.
 pub struct BitPackReader<'a> {
+    /// The buffer from which the reader is reading.
+    buffer: &'a [u8],
     /// Represents the position of the reader in bits.
-    pos: usize,
-    /// Contains the byte currently being read from.
-    byte: u8,
-    /// The underlying reader.
-    reader: &'a mut dyn std::io::Read,
+    position: usize,
 }
 
 impl<'a> BitPackReader<'a> {
-    /// Creates a [`BitPackReader`] from an IO reader.
-    pub fn new(reader: &'a mut dyn std::io::Read) -> Self {
+    pub fn new(buffer: &'a [u8]) -> Self {
         Self {
-            pos: 0,
-            byte: 0,
-            reader,
+            buffer,
+            position: 0,
         }
     }
 
-    /// Returns the current position of this reader, in bits.
-    pub fn pos(&self) -> usize {
-        self.pos
+    pub fn with_position(buffer: &'a [u8], position: usize) -> Self {
+        Self { buffer, position }
     }
 
-    /// Advances the reader to the next full byte (pos % 8).
+    /// Returns the current position of this reader, in bits.
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Advances the reader to the next full byte ((pos % 8) == 0).
     /// If the reader is already aligned, this does nothing.
-    pub fn align(&mut self) -> Result<(), BitPackReaderError> {
-        while self.pos % 8 != 0 {
+    pub fn align(&mut self) -> BitPackResult {
+        while self.position % 8 != 0 {
             self.read_bit()?;
         }
 
         Ok(())
     }
 
-    pub fn read_bit(&mut self) -> Result<bool, BitPackReaderError> {
-        let pos_in_byte = self.pos % 8;
+    pub fn read_bit(&mut self) -> BitPackResult<bool> {
+        let pos_in_buffer = self.position / 8;
+        let pos_in_byte = self.position % 8;
 
-        // at the start of new byte, so we need to read it first.
-        if pos_in_byte == 0 {
-            let mut buf: [u8; 1] = [0];
-            self.reader
-                .read_exact(&mut buf)
-                .map_err(BitPackReaderError::IoError)?;
-            self.byte = buf[0];
+        match self.buffer.get(pos_in_buffer) {
+            Some(byte) => {
+                let value = (byte >> pos_in_byte) & 1 != 0;
+                self.position += 1;
+
+                Ok(value)
+            }
+            None => Err(BitPackError::OutOfBounds),
         }
-
-        let value = (self.byte >> pos_in_byte) & 1 != 0;
-        self.pos += 1;
-
-        Ok(value)
     }
 
-    pub fn read_f32(&mut self) -> Result<f32, BitPackReaderError> {
+    pub fn read_f32(&mut self) -> BitPackResult<f32> {
         self.read_u64(32).map(|v| f32::from_bits(v as u32))
     }
 
-    pub fn read_u64(&mut self, bits: usize) -> Result<u64, BitPackReaderError> {
+    pub fn read_u64(&mut self, bits: usize) -> BitPackResult<u64> {
         let mut value = 0;
 
         for i in 0..bits {
@@ -74,7 +74,8 @@ impl<'a> BitPackReader<'a> {
         Ok(value)
     }
 
-    pub fn read_bytes(&mut self, buf: &mut [u8]) -> Result<(), BitPackReaderError> {
+    // todo: move this to support read<&mut [u8]>
+    pub fn read_bytes(&mut self, buf: &mut [u8]) -> BitPackResult {
         for byte in buf.iter_mut() {
             *byte = self.read_u64(8)? as u8;
         }
@@ -82,51 +83,63 @@ impl<'a> BitPackReader<'a> {
         Ok(())
     }
 
-    pub fn read_string(&mut self, _wide: bool) -> Result<String, BitPackReaderError> {
-        todo!();
+    pub fn read<T>(&mut self) -> BitPackResult<T>
+    where
+        T: ReadValue,
+    {
+        ReadValue::read(self)
+    }
+
+    pub fn read_packed<T>(&mut self, bits: usize) -> BitPackResult<T>
+    where
+        T: ReadPackedValue,
+    {
+        ReadPackedValue::read_packed(self, bits)
+    }
+
+    pub fn read_array<T>(&mut self, length: usize) -> BitPackResult<T>
+    where
+        T: ReadArrayValue,
+    {
+        ReadArrayValue::read_array(self, length)
+    }
+
+    pub fn read_packed_array<T>(&mut self, length: usize, bits: usize) -> BitPackResult<T>
+    where
+        T: ReadPackedArrayValue,
+    {
+        ReadPackedArrayValue::read_packed_array(self, length, bits)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use super::*;
-
-    // TODO: add tests for more complex packets
 
     #[test]
     fn test_read_position_and_alignment() {
         let data = hex::decode("ffffffff").unwrap();
 
         // aligning while at 0 stays at 0
-        let mut cursor = Cursor::new(&data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
         assert!(reader.align().is_ok());
-        assert_eq!(reader.pos(), 0);
-        assert_eq!(cursor.position(), 0);
+        assert_eq!(reader.position(), 0);
 
         // reading 1 bit advances cursor to second byte position.
-        let mut cursor = Cursor::new(&data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
         assert!(reader.read_bit().is_ok());
-        assert_eq!(cursor.position(), 1);
 
         // aligning doesn't consume a byte, but advances bit position.
-        let mut cursor = Cursor::new(&data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
         assert!(reader.read_bit().is_ok());
-        assert_eq!(reader.pos(), 1);
+        assert_eq!(reader.position(), 1);
         assert!(reader.align().is_ok());
-        assert_eq!(reader.pos(), 8);
-        assert_eq!(cursor.position(), 1);
+        assert_eq!(reader.position(), 8);
 
         // reading 9 bits advances cursor to third byte position.
-        let mut cursor = Cursor::new(&data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
         assert!(reader.read_u64(9).is_ok());
-        assert_eq!(reader.pos(), 9);
-        assert_eq!(cursor.position(), 2);
+        assert_eq!(reader.position(), 9);
     }
 
     #[test]
@@ -134,8 +147,7 @@ mod tests {
         let data = "2f00000240c00000000000008800000000000000000000\
             00000000000000489208b89c000000000000000000000000";
         let data = hex::decode(data).unwrap();
-        let mut cursor = Cursor::new(data);
-        let mut reader = BitPackReader::new(&mut cursor);
+        let mut reader = BitPackReader::new(&data);
 
         // header
         assert_eq!(reader.read_u64(24).unwrap(), 47);
@@ -155,6 +167,6 @@ mod tests {
 
         // data is fully read
         assert!(reader.align().is_ok());
-        assert_eq!(cursor.position(), 47);
+        assert_eq!(reader.position(), 47 * 8);
     }
 }

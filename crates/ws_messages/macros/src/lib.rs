@@ -39,13 +39,18 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
         .iter()
         .map(|field| get_field_write(field, FieldAccess::AsField))
         .collect::<Vec<_>>();
+    let field_bits = data_struct
+        .fields
+        .iter()
+        .map(|field| get_field_bits(field, FieldAccess::AsField))
+        .collect::<Vec<_>>();
 
     let expanded = quote! {
         impl MessageStruct for #ident {}
 
-        impl ws_messages::reader::SimpleReader<#ident> for ws_messages::reader::MessageReader<#ident> {
-            fn read(reader_: &mut BitPackReader) -> Result<#ident, BitPackReaderError> {
-                use ws_messages::reader::*;
+        impl ws_bitpack::ReadValue for #ident {
+            fn read(reader_: &mut ws_bitpack::BitPackReader) -> ws_bitpack::BitPackResult<Self> {
+                use ws_bitpack::*;
                 #(let #field_idents = #field_reads;)*
                 Ok(#ident {
                     #(#field_idents,)*
@@ -53,11 +58,16 @@ pub fn derive_message_struct(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ws_messages::writer::SimpleWriter<#ident> for ws_messages::writer::MessageWriter<#ident> {
-            fn write(writer_: &mut BitPackWriter, value_: &#ident) -> Result<(), BitPackWriterError> {
-                use ws_messages::writer::*;
+        impl ws_bitpack::WriteValue for #ident {
+            fn write(&self, writer_: &mut ws_bitpack::BitPackWriter) -> ws_bitpack::BitPackResult {
+                use ws_bitpack::*;
                 #(#field_writes;)*
                 Ok(())
+            }
+            fn bits(&self) -> usize {
+                let mut bits_: usize = 0;
+                #(#field_bits;)*
+                bits_
             }
         }
     };
@@ -142,14 +152,20 @@ pub fn derive_message_union(input: TokenStream) -> TokenStream {
         .collect::<Vec<_>>();
 
     let expanded = quote! {
-        impl MessageUnion for #ident {}
+        impl ws_bitpack::UnionVariant for #ident {
+            fn variant(&self) -> usize {
+                match self {
+                    #(#ident::#variant_idents { .. } => #variant_indices,)*
+                }
+            }
+        }
 
-        impl ws_messages::reader::UnionReader<#ident> for ws_messages::reader::MessageReader<#ident> {
+        impl ws_bitpack::ReadUnionValue for #ident {
             fn read_union(
                 reader_: &mut BitPackReader,
                 variant_: usize,
-            ) -> Result<#ident, BitPackReaderError> {
-                use ws_messages::reader::*;
+            ) -> ws_bitpack::BitPackResult<Self> {
+                use ws_bitpack::*;
                 Ok(match variant_ {
                     #(#variant_indices => #variant_reads,)*
                     // TODO: use an error instead
@@ -158,18 +174,22 @@ pub fn derive_message_union(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ws_messages::writer::SimpleWriter<#ident> for ws_messages::writer::MessageWriter<#ident> {
+        impl ws_bitpack::WriteValue for #ident {
             fn write(
+                &self,
                 writer_: &mut BitPackWriter,
-                value_: &#ident,
-            ) -> Result<(), BitPackWriterError> {
-                use ws_messages::writer::*;
-                Ok(match value_ {
+            ) -> ws_bitpack::BitPackResult {
+                use ws_bitpack::*;
+                Ok(match self {
                     #(#variant_writes,)*
                 })
             }
+            fn bits(&self) -> usize {
+                0 // TODO
+            }
         }
 
+        /*
         impl ws_messages::writer::UnionVariant<#ident> for ws_messages::writer::MessageWriter<#ident> {
             fn variant(value: &#ident) -> usize {
                 match value {
@@ -177,6 +197,7 @@ pub fn derive_message_union(input: TokenStream) -> TokenStream {
                 }
             }
         }
+        */
     };
 
     TokenStream::from(expanded)
@@ -192,8 +213,8 @@ fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
     match &field.ty {
         syn::Type::Path(_) => {
             let read_expr = get_read_expr(&field_metadata);
-            quote!{{ #align_expr; #read_expr }}
-        },
+            quote! {{ #align_expr; #read_expr }}
+        }
         Type::Array(a) => {
             let len = &a.len;
             match *a.elem {
@@ -227,14 +248,23 @@ fn get_field_read(field: &Field) -> proc_macro2::TokenStream {
 
 fn get_read_expr(field_metadata: &FieldMetadata) -> proc_macro2::TokenStream {
     match field_metadata {
-        FieldMetadata::Simple => quote!(MessageReader::read(reader_)?),
-        FieldMetadata::Packed { bits } => quote!(MessageReader::read_packed(reader_, #bits)?),
-        FieldMetadata::List { length } => quote!(MessageReader::read_list(reader_, #length)?),
-        FieldMetadata::PackedList { bits, length } => {
-            quote!(MessageReader::read_packed_list(reader_, #length, #bits)?)
+        FieldMetadata::Simple => quote!(ws_bitpack::ReadValue::read(reader_)?),
+        FieldMetadata::Packed { bits } => {
+            quote!(ws_bitpack::ReadPackedValue::read_packed(reader_, #bits)?)
         }
-        FieldMetadata::Ascii => quote!(MessageReader::read_ascii(reader_)?),
-        FieldMetadata::Union { variant } => quote!(MessageReader::read_union(reader_, #variant)?),
+        FieldMetadata::Array { length } => {
+            quote!(ws_bitpack::ReadArrayValue::read_array(reader_, #length)?)
+        }
+        FieldMetadata::PackedArray { bits, length } => {
+            quote!(ws_bitpack::ReadPackedArrayValue::read_packed_array(reader_, #length, #bits)?)
+        }
+        // todo: handle ascii?
+        //FieldMetadata::Ascii => quote!(MessageReader::read_ascii(reader_)?),
+        FieldMetadata::Ascii => quote!(ws_bitpack::ReadValue::read(reader_)?),
+        FieldMetadata::Union { variant } => {
+            // TODO: Verify this. Our trait for it is unfinished.
+            quote!(ws_bitpack::ReadUnionValue::read_union(reader_, #variant)?)
+        }
     }
 }
 
@@ -243,10 +273,10 @@ fn get_field_write(field: &Field, access: FieldAccess) -> proc_macro2::TokenStre
     let field_metadata = get_field_metadata(field, FieldAccess::AsField);
     let field_access = match access {
         FieldAccess::AsVar => quote!(#ident),
-        FieldAccess::AsField => quote!(&value_.#ident),
+        FieldAccess::AsField => quote!(&self.#ident),
     };
     let align_expr = match get_field_aligned(field) {
-        true => quote!(writer_.align_and_flush()?),
+        true => quote!(writer_.align()?),
         false => quote!(),
     };
 
@@ -254,7 +284,7 @@ fn get_field_write(field: &Field, access: FieldAccess) -> proc_macro2::TokenStre
         syn::Type::Path(_) => {
             let write_expr = get_write_expr(&field_metadata, field_access);
             quote!({ #align_expr; #write_expr })
-        },
+        }
         Type::Array(a) => match *a.elem {
             syn::Type::Path(_) => {
                 let write_expr = get_write_expr(&field_metadata, quote!(item));
@@ -281,21 +311,82 @@ fn get_field_write(field: &Field, access: FieldAccess) -> proc_macro2::TokenStre
     }
 }
 
+fn get_field_bits(field: &Field, access: FieldAccess) -> proc_macro2::TokenStream {
+    let ident = field.ident.as_ref().unwrap();
+    let field_metadata = get_field_metadata(field, FieldAccess::AsField);
+    let field_access = match access {
+        FieldAccess::AsVar => quote!(#ident),
+        FieldAccess::AsField => quote!(&self.#ident),
+    };
+    let align_expr = match get_field_aligned(field) {
+        true => quote!(bits_ += 8 - (bits_ % 8)),
+        false => quote!(),
+    };
+
+    match &field.ty {
+        syn::Type::Path(_) => {
+            let write_expr = get_bits_expr(&field_metadata, field_access);
+            quote!({ #align_expr; #write_expr; })
+        }
+        Type::Array(a) => match *a.elem {
+            syn::Type::Path(_) => {
+                let bits_expr = get_bits_expr(&field_metadata, quote!(item));
+                quote! {
+                    #align_expr;
+                    for item in #field_access {
+                        #bits_expr;
+                    }
+                }
+            }
+            _ => {
+                let t = a.elem.to_token_stream().to_string();
+                let n = get_field_name(field);
+                let error = format!("Unsupported array element type: {t} for field: {n}");
+                quote!(compile_error!(#error))
+            }
+        },
+        _ => {
+            let t = field.ty.to_token_stream().to_string();
+            let n = get_field_name(field);
+            let error = format!("Unsupported field type: {t} for field: {n}");
+            quote!(compile_error!(#error))
+        }
+    }
+}
+
 fn get_write_expr(
     field_metadata: &FieldMetadata,
     value: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     match field_metadata {
-        FieldMetadata::Simple => quote!(MessageWriter::write(writer_, #value)?),
-        FieldMetadata::Packed { bits } => {
-            quote!(MessageWriter::write_packed(writer_, #value, #bits)?)
-        }
-        FieldMetadata::List { .. } => quote!(MessageWriter::write(writer_,  #value)?),
-        FieldMetadata::PackedList { bits, .. } => {
-            quote!(MessageWriter::write_packed(writer_, #value, #bits)?)
+        FieldMetadata::Simple => quote!(writer_.write(#value)?),
+        FieldMetadata::Packed { bits } => quote!(writer_.write_packed(#value, #bits)?),
+        FieldMetadata::Array { .. } => quote!(writer_.write_array(#value)?),
+        FieldMetadata::PackedArray { bits, .. } => {
+            quote!(writer_.write_packed_array(#value, #bits)?)
         }
         FieldMetadata::Ascii => quote!(MessageWriter::write_ascii(writer_, #value)?),
-        FieldMetadata::Union { .. } => quote!(MessageWriter::write(writer_, #value)?),
+        FieldMetadata::Union { .. } => quote!(writer_.write(#value)?),
+    }
+}
+
+fn get_bits_expr(
+    field_metadata: &FieldMetadata,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match field_metadata {
+        FieldMetadata::Simple => quote!(bits_ += ws_bitpack::WriteValue::bits(#value)),
+        FieldMetadata::Packed { bits } => {
+            quote!(bits_ += ws_bitpack::WritePackedValue::bits_packed(#value, #bits))
+        }
+        FieldMetadata::Array { .. } => {
+            quote!(bits_ += ws_bitpack::WriteArrayValue::bits_array(#value))
+        }
+        FieldMetadata::PackedArray { bits, .. } => {
+            quote!(bits_ += ws_bitpack::WritePackedArrayValue::bits_packed_array(#value, #bits))
+        }
+        FieldMetadata::Ascii => todo!(),
+        FieldMetadata::Union { .. } => quote!(bits_ += ws_bitpack::WriteValue::bits(#value)),
     }
 }
 
@@ -321,17 +412,17 @@ enum FieldMetadata {
     Packed {
         bits: usize,
     },
-    List {
+    Array {
         length: proc_macro2::TokenStream,
     },
-    PackedList {
+    PackedArray {
         bits: usize,
         length: proc_macro2::TokenStream,
     },
-    Ascii,
     Union {
         variant: proc_macro2::TokenStream,
     },
+    Ascii,
 }
 
 fn get_field_aligned(field: &Field) -> bool {
@@ -375,7 +466,7 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
         })
         .map(|length| match access {
             FieldAccess::AsVar => quote!(#length as usize),
-            FieldAccess::AsField => quote!(value_.#length as usize),
+            FieldAccess::AsField => quote!(self.#length as usize),
         });
 
     let variant_expr = field
@@ -396,25 +487,18 @@ fn get_field_metadata(field: &Field, access: FieldAccess) -> FieldMetadata {
         })
         .map(|variant| match access {
             FieldAccess::AsVar => quote!(#variant as usize),
-            FieldAccess::AsField => quote!(value_.#variant as usize),
+            FieldAccess::AsField => quote!(self.#variant as usize),
         });
 
     let is_ascii = field.attrs.iter().any(|a| a.path.is_ident("ascii"));
 
-    if let Some(length) = length_expr {
-        if let Some(bits) = packed_bits {
-            FieldMetadata::PackedList { bits, length }
-        } else {
-            FieldMetadata::List { length }
-        }
-    } else if let Some(bits) = packed_bits {
-        FieldMetadata::Packed { bits }
-    } else if let Some(variant) = variant_expr {
-        FieldMetadata::Union { variant }
-    } else if is_ascii {
-        FieldMetadata::Ascii
-    } else {
-        // NOTE: Invalid combinations currently return this. We could look into that at some point.
-        FieldMetadata::Simple
+    match (packed_bits, length_expr, variant_expr, is_ascii) {
+        (None, None, None, false) => FieldMetadata::Simple,
+        (Some(bits), None, None, false) => FieldMetadata::Packed { bits },
+        (None, Some(length), None, false) => FieldMetadata::Array { length },
+        (Some(bits), Some(length), None, false) => FieldMetadata::PackedArray { bits, length },
+        (None, None, Some(variant), false) => FieldMetadata::Union { variant },
+        (None, None, None, true) => FieldMetadata::Ascii,
+        _ => panic!("invalid attributes combination"),
     }
 }

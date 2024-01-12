@@ -1,7 +1,5 @@
 mod macros;
 pub use macros::*;
-pub mod reader;
-pub mod writer;
 
 pub trait Message {
     fn id() -> u32;
@@ -15,6 +13,8 @@ where
 
 pub trait MessageUnion
 where
-    Self: Sized,
+    Self: Sized
 {
+    /// Returns the 0-based variant index for that union value.
+    fn variant(&self) -> usize;
 }
